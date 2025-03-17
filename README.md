@@ -7,17 +7,21 @@
 
 ## Environment Setting
 
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
 ```
-expert LOCAL_NIM_CACHE=nim_cache
-mkdir $LOCAL_NIM_CACHE
-chmod 777 $LOCAL_NIM_CACHE
- 
-pip install --upgrade pip
-python -m venv rag_venv
- 
-source rag_venv/bin/activate
- 
+
+conda create -n rag python=3.12
+conda activate rag
+
 pip install -r requirements.txt
+
+
+sudo apt-get update
+sudo apt-get install build-essential
+
+pip install --extra-index-url https://pypi.nvidia.com nemo-curator[all]
+
 ```
 
 ## Install Milvus Standalone
@@ -64,11 +68,14 @@ rm -rf volumes
 - Rerank: nvcr.io/nim/nvidia/llama-3.2-nv-rerankqa-1b-v2:1.3.1
 
 ```
+export LOCAL_NIM_CACHE=cache
+mkdir -p $LOCAL_NIM_CACHE
+chmod 777 $LOCAL_NIM_CACHE
+export IMG_NAME=nvcr.io/nim/meta/llama-3.2-1b-instruct:1.8.1
 export CONTAINER_NAME=llama-3.2-1b-instruct
  
 # Multi-GPU
 docker run -d --name=$CONTAINER_NAME \
-  --runtime=nvidia \
   --gpus all \
   --shm-size=16GB \
   -e NGC_API_KEY=$NGC_API_KEY \
@@ -79,7 +86,7 @@ docker run -d --name=$CONTAINER_NAME \
  
 # Single-GPU
 docker run -d --name=$CONTAINER_NAME \
-  --runtime=nvidia \
+  --gpus all \
   -e NGC_API_KEY=$NGC_API_KEY \
   -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
   -u $(id -u) \
@@ -87,18 +94,24 @@ docker run -d --name=$CONTAINER_NAME \
   $IMG_NAME
 
 ```
-- Test NIM
+## Test NIM
 
 ```
-curl -s http://0.0.0.0:8000/v1/models | jq
+# Check container IP
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_NAME
+
+sudo apt-get install jq
+
+# check model "id" for "model"
+curl -s http://172.17.0.2:8000/v1/models | jq
  
-curl -X 'POST' \
-    'http://0.0.0.0:8000/v1/completions' \
+curl -s 'POST' \
+    'http://172.17.0.2:8000/v1/completions' \
     -H 'accept: application/json' \
     -H 'Content-Type: application/json' \
     -d '{
-      "model": "",
+      "model": "meta/llama-3.2-1b-instruct",
       "prompt": "What is the Machine Learning?",
       "max_tokens": 128
-    }'
+    }' | jq
 ```

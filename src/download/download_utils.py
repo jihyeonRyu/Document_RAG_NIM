@@ -7,8 +7,56 @@ import copy
 from src.config import CODE_BLOCK_MARKER, URL_BOLCK_MARKER, IMAGE_BLOCK_MARKER, MIN_IMAGE_SIZE
 import datetime
 
+from urllib.parse import urljoin
+import html
 
-def extract_image_urls(soup: BeautifulSoup, min_dimension:int=100):
+
+def is_valid_url(url):
+    try:
+        response = requests.head(url, allow_redirects=True)
+
+        return response.status_code >= 200 and response.status_code < 300
+    except requests.RequestException as e:
+        print(f"URL 확인 중 오류 발생: {e}")
+        return False
+    
+    
+def get_document_url_list(url):
+    # URL로부터 HTML 코드 읽어오기
+    response = requests.get(url)
+    response.raise_for_status()
+    html_content = response.text
+
+    # BeautifulSoup 객체 생성
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    # "Table of Contents"가 있는 nav 태그 찾기
+    nav = soup.find("nav", {"aria-label": "Table of Contents"})
+    
+    # root URL 결정: 인자로 주어진 url의 마지막 슬래시(/) 전까지의 경로
+    if url.endswith('/'):
+        root = url
+    else:
+        root = url.rsplit('/', 1)[0] + '/'
+
+    urls = []
+    print("Start to get urls ...")
+    if nav:
+        # 'reference internal' 클래스를 가진 모든 <a> 태그를 순회
+        for a_tag in nav.find_all("a", class_="reference internal"):
+            href = a_tag.get("href")
+            # href가 '#'인 경우, 현재 페이지의 파일명으로 대체
+            if href == "#":
+                href = url.split("/")[-1]
+            # root와 href 결합
+            full_url = urljoin(root, href)
+            if is_valid_url(full_url):
+                urls.append(full_url)
+                
+    print(f"Get Urls: {len(urls)}")
+    return urls
+
+def extract_image_urls(soup: BeautifulSoup, base_url: str, min_dimension:int=100):
     
     image_index = 0
     image_blocks = {}
@@ -27,7 +75,13 @@ def extract_image_urls(soup: BeautifulSoup, min_dimension:int=100):
                 continue  # 아이콘 등 작은 이미지는 건너뜀
         marker = f"{IMAGE_BLOCK_MARKER}{image_index}"
         image_index += 1
-        image_info = {"src": img["src"]}
+        if not img["src"].startswith("https://"):
+            img_src = base_url + "/" + img["src"]
+        else:
+            img_src = img["src"]
+            
+        image_info = {"src": img_src}
+        
         if img.has_attr("alt"):
             image_info["alt"] = img["alt"]
         if width is not None:
@@ -38,6 +92,42 @@ def extract_image_urls(soup: BeautifulSoup, min_dimension:int=100):
         img.replace_with(marker)
         
     return image_blocks
+
+def extract_code_blocks(soup: BeautifulSoup) -> Dict:
+    code_blocks = {}
+    index = 0
+    # 먼저 <pre> 태그에서 코드 예제를 추출
+    for pre in soup.find_all("pre"):
+        marker = f"{CODE_BLOCK_MARKER}{index}"
+        code_blocks[marker] = html.unescape(pre.get_text())  # 코드 포맷 보존
+        pre.replace_with(marker)
+        index += 1
+    # <pre> 안에 있지 않은 <code> 태그들도 추출 (인라인 코드 포함)
+    for code in soup.find_all("code"):
+        marker = f"{CODE_BLOCK_MARKER}{index}"
+        code_blocks[marker] = html.unescape(code.get_text())
+        code.replace_with(marker)
+        index += 1
+    return code_blocks
+
+def extract_url_blocks(soup: BeautifulSoup, base_url: str) -> Dict:
+    
+    # URL 정보 보존: <a> 태그의 href를 고유 마커로 치환
+    url_blocks = {}
+    for i, a in enumerate(soup.find_all("a", href=True)):
+        marker = f"{URL_BOLCK_MARKER}{i}"
+        if a["href"].startswith("#"):
+            url_blocks[marker] = base_url + a["href"]  # URL 정보 보존
+        elif a["href"].startswith("https://"):
+            url_blocks[marker] = base_url + "/" + a["href"]
+        else:
+            url_blocks[marker] = a["href"]
+            
+        a.replace_with(marker)
+        
+    return url_blocks
+
+
 
 def html_document_loader(url: Union[str, bytes]) -> Tuple[str, Dict, Dict, Dict]:
 

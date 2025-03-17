@@ -1,6 +1,6 @@
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from typing import List, Tuple
-from src.dataset import process_document_for_embedding
+from src.download.download_utils import process_document_for_embedding
 from langchain_milvus import Milvus
 from src.config import CHUNK_SIZE, CHUNK_OVERLAP
 
