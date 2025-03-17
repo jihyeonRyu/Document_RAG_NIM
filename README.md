@@ -1,4 +1,10 @@
 # RAG Pipeline (Local NIM + Langchain + Milvus)
+
+## Object: NVIDIA Document RAG Pipeline 
+- https://docs.nvidia.com/<DOCUMENT> 
+
+- [NIM Document](https://docs.nvidia.com/nim/large-language-models/latest/getting-started.html)
+
 ## Environment Setting
 
 ```
@@ -16,7 +22,7 @@ pip install -r requirements.txt
 
 ## Install Milvus Standalone
 
-- [Milvus Doc](https://docs.nvidia.com/nim/large-language-models/latest/configuration.html#environment-variables)
+- [Milvus Doc](https://milvus.io/docs/ko/install_standalone-docker-compose-gpu.md)
 
 ```
 wget https://github.com/milvus-io/milvus/releases/download/v2.5.6/milvus-standalone-docker-compose-gpu.yml -O docker-compose.yml
@@ -54,6 +60,7 @@ rm -rf volumes
 
 - LLM: nvcr.io/nim/meta/llama-3.2-1b-instruct:1.8.1
 - Embedding: nvcr.io/nim/nvidia/nv-embedqa-e5-v5:1.1.0
+    - https://build.nvidia.com/nvidia/embed-qa-4?snippet_tab=LangChain
 - Rerank: nvcr.io/nim/nvidia/llama-3.2-nv-rerankqa-1b-v2:1.3.1
 
 ```
