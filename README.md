@@ -97,16 +97,13 @@ docker run -d --name=$CONTAINER_NAME \
 ## Test NIM
 
 ```
-# Check container IP
-docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_NAME
-
 sudo apt-get install jq
 
 # check model "id" for "model"
-curl -s http://172.17.0.2:8000/v1/models | jq
+curl -s http://0.0.0.0:8000/v1/models | jq
  
 curl -s 'POST' \
-    'http://172.17.0.2:8000/v1/completions' \
+    'http://0.0.0.0:8000/v1/completions' \
     -H 'accept: application/json' \
     -H 'Content-Type: application/json' \
     -d '{

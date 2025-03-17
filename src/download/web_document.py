@@ -19,32 +19,36 @@ import re
 import subprocess
 from typing import Literal, Optional
 from urllib.parse import quote, urlparse
-
-from distributed import Lock
-import html
-
-from nemo_curator.datasets import DocumentDataset
-from nemo_curator.download.doc_builder import (
-    DocumentDownloader,
-    DocumentExtractor,
-    DocumentIterator,
-    download_and_extract,
-)
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import datetime
 
 from bs4 import BeautifulSoup
 from src.download.download_utils import get_document_url_list, extract_code_blocks, extract_image_urls, extract_url_blocks
-from nemo_curator.utils.file_utils import expand_outdir_and_mkdir
+import tqdm
 
 
-class WebDocumentDownloader(DocumentDownloader):
-
-    def __init__(self, download_dir, verbose=False):
-        super().__init__()
+class WebDocumentDownloader():
+    
+    def __init__(self, target_url, download_dir, chunk_size, chunk_overlap):
         self._download_dir = download_dir
-        self._verbose = verbose
-        self._lock = Lock(name="webdocument_downloader")
-
+        self._chunk_size = chunk_size
+        self._chunk_overlap = chunk_overlap
+        self._urls = get_document_url_list(target_url)
+        self._base_url = urlparse(target_url).path[0]
+        self._subject = urlparse(target_url).path[1]
+        self._counter = 0
+        
+    def __len__(self):
+        return len(self._urls)
+        
+    def run(self):
+        
+        for url in tqdm.tqdm(self._urls):
+            doc_data, meta_data = self.prepare_document_for_embedding(url, self._chunk_size, self._chunk_overlap)
+            yield doc_data, meta_data
+        
     def download(self, url):
+        
         urlpath = urlparse(url).path[1:]
         output_name = urlpath.replace("/", "-")
         output_file = os.path.join(self._download_dir, output_name)
@@ -54,31 +58,22 @@ class WebDocumentDownloader(DocumentDownloader):
             print(f"Downloading {url} and writing to {output_file}")
             # Download with either wget or s5cmd (aws)
             cmd = ["wget", url, "-O", output_file]
-            if self._verbose:
-                stdout, stderr = None, None
-            else:
-                stdout, stderr = subprocess.DEVNULL, subprocess.DEVNULL
-            with self._lock:
-                p = subprocess.run(
-                    cmd,
-                    stdout=stdout,
-                    stderr=stderr,
-                )
+
+            stdout, stderr = subprocess.DEVNULL, subprocess.DEVNULL
+            p = subprocess.run(
+                cmd,
+                stdout=stdout,
+                stderr=stderr,
+            )
             if p.returncode != 0:
                 print(f"Failed to download {url} to {output_file}")
-
-        return output_file
-
-
-class WebDocumentIterator(DocumentIterator):
-
-    def __init__(self, base_url:str, log_frequency=1000):
-        super().__init__()
-        self._base_url = base_url
-        self._log_frequency = log_frequency
-        self._counter = 0
+                
+        return self.extract(*self.iterate(output_file))
+        
+        
 
     def iterate(self, file_path):
+        
         self._counter = 0
         bname = os.path.basename(file_path)
         
@@ -93,13 +88,23 @@ class WebDocumentIterator(DocumentIterator):
         if not article:
             print(f"Article with class 'bd-article' not found in {file_path}")
             return
-
+        
+        # 제거할 태그 목록
+        unwanted_tags = [
+            "script", "style", "nav", "header", "footer", "aside",
+            "link", "meta", "input", "button"
+        ]
+        
         # 각 section 태그(단, id 속성이 있는 태그)를 순회
         sections = article.find_all("section", id=True)
+
         for section in sections:
+            
+            # 불필요한 태그 모두 제거
+            for tag_name in unwanted_tags:
+                for tag in section.find_all(tag_name):
+                    tag.decompose()
             self._counter += 1
-            if self._counter % self._log_frequency == 0:
-                print(f"Processed {self._counter} sections from {file_path}")
 
             section_id = section.get("id")
             # 제목은 해당 section 내의 h1, h2, h3 등에서 추출
@@ -107,137 +112,113 @@ class WebDocumentIterator(DocumentIterator):
             header = header_tag.get_text(strip=True) if header_tag else ""
 
             # 섹션의 전체 텍스트 콘텐츠 추출 (필요에 따라 header를 제거할 수도 있음)
-            content = section.get_text(separator="\n", strip=True)
-
+            # content = section.get_text(separator="\n", strip=True)
+            content = str(section)
             # URL은 base_url과 section_id를 조합해 생성 (필요에 따라 더 복잡하게 조합 가능)
             url = f"{self._base_url}/{ori_url}#{quote(section_id)}"
 
-            yield {
+            return ({
                 "section_id": section_id,
                 "header": header,
-                "url": url,
+                "section_url": url,
                 "source_id": bname,
-            }, content
-
-
-class WebDocumentExtractor(DocumentExtractor):
-
-    def __init__(self, base_url: str):
-        super().__init__()
-        self._base_url = base_url
-
-    def extract(self, content):
+                "subject": self._subject
+            }, content)
+            
+    def extract(self, meta, content):
         
         soup = BeautifulSoup(content, "html.parser")
         
         url_blocks = extract_url_blocks(soup, self._base_url)
         img_blocks = extract_image_urls(soup, self._base_url)
         code_blocks = extract_code_blocks(soup)
-       
+    
         text = soup.get_text(separator="\n", strip=True)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n", "\n", text)
         
-        # return {"text": text, "meta": }
-        yield {
+        extracted_meta = {
                 "code": code_blocks, "urls": url_blocks, "images": img_blocks
-            }, text
-
-def download_web_documents(
-    target_url: str,
-    output_path: str,
-    output_type: Literal["jsonl", "parquet"] = "jsonl",
-    raw_download_dir: Optional[str] = None,
-    keep_raw_download: bool = False,
-    force_download: bool = False,
-    url_limit: Optional[int] = None,
-    record_limit: Optional[int] = None,
-) -> DocumentDataset:
-    """
-    Downloads and extracts articles from a Wikipedia dump.
-
-    This function retrieves a list of Wikipedia dump URLs for the specified language and dump date,
-    downloads the compressed bz2 dump file (if it is not already present), and extracts its articles
-    using mwparserfromhell. The resulting articles are saved in the specified output format (e.g., "jsonl")
-    along with relevant metadata.
-
-    Args:
-        target_url (str): document root url
-        output_path (str): The root directory where the final extracted files and intermediate outputs
-            (if any) are stored.
-        output_type (Literal["jsonl", "parquet"], optional): The file format/extension for saving the extracted documents (e.g., "jsonl").
-            Defaults to "jsonl". This is not used for the output file, but is used to check if an extracted output
-            already exists and read it if so.
-        raw_download_dir (Optional[str], optional): Directory used for temporary storage of raw bz2 dump files.
-            If None, a subdirectory named "downloads" under output_path is used.
-        keep_raw_download (bool, optional): If True, retains the raw bz2 files after extraction.
-            Default is False.
-        force_download (bool, optional): If False, skips re-downloading or re-extracting files that already exist.
-        url_limit (Optional[int], optional): The maximum number of dump file URLs to process. If None, all
-            available URLs are processed.
-        record_limit (Optional[int], optional): Limit the number of records to extract from each file.
-            If None, all available records are extracted.
-
-    Returns:
-        DocumentDataset: A dataset object containing the extracted Wikipedia articles along with associated metadata.
-    """
-    document_urls = get_document_url_list(target_url)
-    
-    if url_limit:
-        document_urls = document_urls[:url_limit]
+            }
+        extracted_meta.update(meta)
         
-    output_paths = list(
-        map(
-            lambda url: os.path.join(
-                output_path, url.split("/")[-1] + f".{output_type}"
-            ),
-            document_urls,
+        return extracted_meta, text
+        
+    def prepare_document_for_embedding(self, url: str, chunk_size: int = 2000, chunk_overlap: int = 200):
+        
+        meta_origin, text = self.download(url)
+        
+        code_blocks, url_blocks, image_blocks = meta_origin["code"], meta_origin["urls"], meta_origin["images"]
+        meta_origin.pop("code")
+        meta_origin.pop("urls")
+        meta_origin.pop("images")
+        
+         # 자연어 텍스트를 원하는 청크 크기로 분할합니다.
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", " "]
         )
-    )
+        chunks = splitter.split_text(text)
+        
+        # 각 청크와 관련된 코드 블록(만약 청크 내에 코드 관련 설명이 있었다면)을 메타데이터에 추가합니다.
+        # 여기서는 간단하게, 코드 블록이 원래 문서 내에 있었던 위치(예: 주변 문단)에 해당하는지 여부를 확인하는 로직이 추가될 수 있습니다.
+        # 예제에서는 단순히, 전체 코드 블록들을 메타데이터로 저장하는 방식입니다.
+        meta_dataset = []
+        doc_dataset = []
+        for chunk in chunks:
 
-    if not raw_download_dir:
-        raw_download_dir = os.path.join(output_path, "downloads")
-    expand_outdir_and_mkdir(raw_download_dir)
+            doc_dataset.append(chunk)
+            # add more metadata
+            current_time = datetime.datetime.now().isoformat() 
+            metadata = {"url": url, "created_at": current_time}
+            metadata.update(meta_origin)
+            
+            associated_codes = {}
+            for marker, code in code_blocks.items():
+                if marker in chunk:
+                    associated_codes[marker] = code
+                    
+            if associated_codes:
+                metadata["code"] = associated_codes
+                
+                for keys in associated_codes.keys():
+                    code_blocks.pop(keys)
+                    
+            
+            associated_urls = {}
+            for marker, url_val in url_blocks.items():
+                if marker in chunk:
+                    associated_urls[marker] = url_val
 
-    downloader = WebDocumentDownloader(raw_download_dir)
-    base_url = urlparse(url).path[0]
-    iterator = WebDocumentIterator(base_url=base_url)
-    extractor = WebDocumentExtractor(base_url=base_url)
+            if associated_urls:
+                metadata["urls"] = associated_urls
+                
+                for key in associated_urls.keys():
+                    url_blocks.pop(key)
+                    
+                    
+            associated_images = {}
+            for marker, image_val in image_blocks.items():
+                if marker in chunk:
+                    associated_images[marker] = image_val
+            if associated_images:
+                metadata["images"] = associated_images
+                for key in associated_images.keys():
+                    image_blocks.pop(key)
 
-    output_format = {
-        "text": str,
-        "title": str,
-        "id": str,
-        "url": str,
-        "language": str,
-        "source_id": str,
-        "file_name": str,
-    }
-    
-    dataset = download_and_extract(
-        document_urls,
-        output_paths,
-        downloader,
-        iterator,
-        extractor,
-        output_format,
-        output_type=output_type,
-        keep_raw_download=keep_raw_download,
-        force_download=force_download,
-        filename_col="file_name"
-    )
-
-    return dataset
-
-
+            meta_dataset.append(metadata)
+        
+        return doc_dataset, meta_dataset
+            
+            
+            
 if __name__ == "__main__":
     
     url = "https://docs.nvidia.com/nim/large-language-models/latest/getting-started.html"
-    
-    dataset = download_web_documents(url, "./../data")
-    
-    for data in dataset:
-        print(data)
-    
+    downloader = WebDocumentDownloader("https://docs.nvidia.com/nim/large-language-models/latest/getting-started.html", "./data")
+    for doc_data, meta_data in downloader.run():
+        print("Document Data:", doc_data)
+        # print("Metadata:", meta_data)
     
     
